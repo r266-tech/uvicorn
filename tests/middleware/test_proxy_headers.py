@@ -11,7 +11,7 @@ from tests.response import Response
 from tests.utils import run_server
 from uvicorn._types import ASGIReceiveCallable, ASGISendCallable, Scope
 from uvicorn.config import Config
-from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware, _TrustedHosts
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware, _TrustedHosts, _strip_port_from_xff_entry
 
 if TYPE_CHECKING:
     from uvicorn.protocols.http.h11_impl import H11Protocol
@@ -493,3 +493,46 @@ async def test_proxy_headers_empty_x_forwarded_for() -> None:
         response = await client.get("/", headers=headers)
     assert response.status_code == 200
     assert response.text == "https://127.0.0.1:123"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("forwarded_for", "expected"),
+    [
+        # IPv4 with port should be stripped
+        ("1.2.3.4:1024", "https://1.2.3.4:0"),
+        # IPv4 without port works as before
+        ("1.2.3.4", "https://1.2.3.4:0"),
+        # Multiple proxies with port
+        ("1.2.3.4:1024, 10.0.2.1:8080", "https://1.2.3.4:0"),
+        # IPv6 with port
+        ("[::1]:8080", "https://::1:0"),
+        # Bracketed IPv6 without port is unusual but harmless
+        ("[::1]", "https://::1:0"),
+    ],
+)
+async def test_proxy_headers_xff_with_port(forwarded_for: str, expected: str) -> None:
+    async with make_httpx_client("*") as client:
+        headers = {X_FORWARDED_FOR: forwarded_for, X_FORWARDED_PROTO: "https"}
+        response = await client.get("/", headers=headers)
+    assert response.status_code == 200
+    assert response.text == expected
+
+
+def test_strip_port_from_xff_entry() -> None:
+    # IPv4 with port
+    assert _strip_port_from_xff_entry("1.2.3.4:8080") == "1.2.3.4"
+    # IPv4 without port
+    assert _strip_port_from_xff_entry("1.2.3.4") == "1.2.3.4"
+    # Bare IPv6 (no port to strip)
+    assert _strip_port_from_xff_entry("::1") == "::1"
+    assert _strip_port_from_xff_entry("2001:db8::1") == "2001:db8::1"
+    # Bracketed IPv6 with port
+    assert _strip_port_from_xff_entry("[::1]:8080") == "::1"
+    assert _strip_port_from_xff_entry("[2001:db8::1]:443") == "2001:db8::1"
+    # Bracketed IPv6 without port
+    assert _strip_port_from_xff_entry("[::1]") == "::1"
+    # Non-IP string (e.g. literal)
+    assert _strip_port_from_xff_entry("some-host:1234") == "some-host"
+    # Empty
+    assert _strip_port_from_xff_entry("") == ""

@@ -51,6 +51,7 @@ class ProxyHeadersMiddleware:
                     # If the x-forwarded-for header is empty then host is an empty string.
                     # Only set the client if we actually got something usable.
                     # See: https://github.com/Kludex/uvicorn/issues/1068
+                    host = _strip_port_from_xff_entry(host)
 
                     # We've lost the connecting client's port information by now,
                     # so only include the host.
@@ -62,6 +63,33 @@ class ProxyHeadersMiddleware:
 
 def _parse_raw_hosts(value: str) -> list[str]:
     return [item.strip() for item in value.split(",")]
+
+
+def _strip_port_from_xff_entry(entry: str) -> str:
+    """Strip a port from an X-Forwarded-For entry.
+
+    XFF entries can include ports, e.g.:
+    - ``1.2.3.4:8080`` (IPv4 with port)
+    - ``[::1]:8080`` (IPv6 with port)
+
+    Returns just the host portion.
+    """
+    # Handle bracketed IPv6 with port: [::1]:8080
+    if entry.startswith("["):
+        closing = entry.find("]")
+        if closing != -1:
+            return entry[1:closing]
+        return entry
+    # Handle IPv4 with port: 1.2.3.4:8080
+    if ":" in entry:
+        try:
+            ipaddress.ip_address(entry)
+            # It's a bare IPv6 address, no port to strip
+            return entry
+        except ValueError:
+            # Not a valid IP, likely IPv4:port — strip last colon segment
+            return entry.rsplit(":", 1)[0]
+    return entry
 
 
 class _TrustedHosts:
